@@ -19,6 +19,7 @@
 package org.apache.zookeeper.server.watch;
 
 import java.io.PrintWriter;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -324,6 +325,66 @@ public class WatchManager implements IWatchManager {
     // VisibleForTesting
     Map<Watcher, Map<String, WatchStats>> getWatch2Paths() {
         return watch2Paths;
+    }
+
+    @Override
+    public synchronized List<WatchRegistration> getWatchRegistrations(
+            String path,
+            Set<Long> sessionIds,
+            int maxResults) {
+        if (maxResults <= 0) {
+            return Collections.emptyList();
+        }
+        List<WatchRegistration> registrations = new ArrayList<>(Math.min(maxResults, 1024));
+        if (path != null) {
+            collectWatchRegistrations(path, watchTable.get(path), sessionIds, maxResults, registrations);
+            return registrations;
+        }
+        for (Entry<String, Set<Watcher>> entry : watchTable.entrySet()) {
+            if (collectWatchRegistrations(
+                    entry.getKey(),
+                    entry.getValue(),
+                    sessionIds,
+                    maxResults,
+                    registrations)) {
+                break;
+            }
+        }
+        return registrations;
+    }
+
+    private boolean collectWatchRegistrations(
+            String path,
+            Set<Watcher> watchers,
+            Set<Long> sessionIds,
+            int maxResults,
+            List<WatchRegistration> registrations) {
+        if (watchers == null) {
+            return false;
+        }
+        for (Watcher watcher : watchers) {
+            if (!(watcher instanceof ServerCnxn) || isDeadWatcher(watcher)) {
+                continue;
+            }
+            long sessionId = ((ServerCnxn) watcher).getSessionId();
+            if (sessionId == 0 || (sessionIds != null && !sessionIds.contains(sessionId))) {
+                continue;
+            }
+            Map<String, WatchStats> paths = watch2Paths.get(watcher);
+            WatchStats stats = paths == null ? null : paths.get(path);
+            if (stats == null) {
+                continue;
+            }
+            for (WatcherMode watcherMode : WatcherMode.values()) {
+                if (stats.hasMode(watcherMode)) {
+                    registrations.add(new WatchRegistration(path, sessionId, watcherMode));
+                    if (registrations.size() >= maxResults) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     @Override
