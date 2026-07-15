@@ -22,6 +22,13 @@
 - ServerCnxn#getSessionTimeout() becomes public; no weakly typed connection-info Map is used.
 - Every production behavior is introduced only after its focused test has failed for the expected missing behavior.
 
+## Local Windows Verification Notes
+
+- Prefix every Maven invocation in this plan with `$env:Path="$env:JAVA_HOME\bin;$env:Path";` so the `zookeeper-jute` build helper uses the configured Java 17 runtime instead of a Java 8 executable found earlier on `PATH`.
+- Install the reactor parent and `zookeeper-jute` artifacts once with `mvn -pl zookeeper-jute -am -DskipTests install` before running `zookeeper-server` alone.
+- Keep the feature's 401/403/allowed authorization coverage in `CommandsTest`. In this checkout, the unchanged `CommandAuthTest` assertions pass but its JUnit temporary-directory cleanup has a reproducible Windows file-lock failure on `version-2/log.1`.
+- The full module suite is not a clean Windows gate in this checkout. Unchanged tests also reproduce file-lock cleanup, CRLF, file-watcher, TLS/Kerberos, read-only-directory, performance, and timing failures; use the focused feature suite locally and a Linux CI run for the full-suite gate.
+
 ---
 
 ### Task 1: Immutable registration model and standard WatchManager query
@@ -592,7 +599,6 @@ git commit -m "增加 DataTree Watch 明细入口"
 **Files:**
 - Modify: zookeeper-server/src/main/java/org/apache/zookeeper/server/admin/Commands.java
 - Test: zookeeper-server/src/test/java/org/apache/zookeeper/server/admin/CommandsTest.java
-- Test: zookeeper-server/src/test/java/org/apache/zookeeper/server/admin/CommandAuthTest.java
 
 **Interfaces:**
 - Consumes: PathUtils#validatePath(String), AuthRequest, CommandResponse.
@@ -665,45 +671,43 @@ private void assertWatchDetailsBadRequest(
 }
 ~~~
 
-Add these authorization tests to CommandAuthTest:
+Add the authorization test to CommandsTest so it uses the existing `ClientBase`
+server and can reset the root ACL in the same lifecycle:
 
 ~~~java
 @Test
-public void testWatchDetailsRequiresAuthorization() {
-    CommandResponse response = Commands.runGetCommand(
-        "watch_details",
-        zks,
-        Collections.emptyMap(),
-        null,
-        null
-    );
-    assertEquals(HttpServletResponse.SC_UNAUTHORIZED, response.getStatusCode());
-}
+public void testWatchDetailsAuthorization() throws Exception {
+    ZooKeeperServer zkServer = serverFactory.getZooKeeperServer();
+    CommandResponse missingAuth = Commands.runGetCommand(
+        "watch_details", zkServer, new HashMap<>(), null, null);
+    assertEquals(HttpServletResponse.SC_UNAUTHORIZED, missingAuth.getStatusCode());
 
-@Test
-public void testWatchDetailsAuthorizationDeniedAndAllowed() throws Exception {
-    setupRootACL(AuthSchema.DIGEST);
+    ZooKeeper zk = createClient();
     try {
+        zk.setACL(Commands.ROOT_PATH, CommandAuthTest.genACLForDigest(), -1);
+        String invalidAuth = "digest" + Commands.AUTH_INFO_SEPARATOR
+            + "InvalidUser:InvalidPassword";
         CommandResponse denied = Commands.runGetCommand(
             "watch_details",
-            zks,
-            Collections.emptyMap(),
-            buildInvalidAuthorizationForDigest(),
+            zkServer,
+            new HashMap<>(),
+            invalidAuth,
             null
         );
         assertEquals(HttpServletResponse.SC_FORBIDDEN, denied.getStatusCode());
 
         CommandResponse allowed = Commands.runGetCommand(
             "watch_details",
-            zks,
-            Collections.emptyMap(),
-            buildAuthorizationForDigest(),
+            zkServer,
+            new HashMap<>(),
+            CommandAuthTest.buildAuthorizationForDigest(),
             null
         );
         assertEquals(HttpServletResponse.SC_OK, allowed.getStatusCode());
     } finally {
-        addAuthInfoForDigest(zk);
-        resetRootACL(zk);
+        CommandAuthTest.addAuthInfoForDigest(zk);
+        CommandAuthTest.resetRootACL(zk);
+        zk.close();
     }
 }
 ~~~
@@ -713,7 +717,7 @@ public void testWatchDetailsAuthorizationDeniedAndAllowed() throws Exception {
 Run:
 
 ~~~powershell
-mvn -pl zookeeper-server "-Dtest=CommandsTest#testWatchDetailsCommandRegistrationAndAuth+testWatchDetailsValidationAndEmptyResponse,CommandAuthTest#testWatchDetailsRequiresAuthorization+testWatchDetailsAuthorizationDeniedAndAllowed" test
+mvn -pl zookeeper-server "-Dtest=CommandsTest#testWatchDetails*" test
 ~~~
 
 Expected: compilation fails because WatchDetailsCommand is absent and neither command name is registered.
@@ -845,12 +849,12 @@ public static class WatchDetailsCommand extends GetCommand {
 
 Run the command from Step 2.
 
-Expected: both command tests and both authorization tests pass.
+Expected: command registration, validation, and 401/403/allowed authorization tests pass.
 
 - [ ] **Step 5: Commit the command contract**
 
 ~~~powershell
-git add -- zookeeper-server/src/main/java/org/apache/zookeeper/server/admin/Commands.java zookeeper-server/src/test/java/org/apache/zookeeper/server/admin/CommandsTest.java zookeeper-server/src/test/java/org/apache/zookeeper/server/admin/CommandAuthTest.java
+git add -- zookeeper-server/src/main/java/org/apache/zookeeper/server/admin/Commands.java zookeeper-server/src/test/java/org/apache/zookeeper/server/admin/CommandsTest.java
 git commit -m "增加 watch_details 命令契约"
 ~~~
 
@@ -1549,7 +1553,7 @@ private CommandResponse execute(
 Run:
 
 ~~~powershell
-mvn -pl zookeeper-server -Dtest=CommandsTest,CommandAuthTest test
+mvn -pl zookeeper-server -Dtest=CommandsTest test
 ~~~
 
 Expected: all selected tests pass; logs contain the expected warning only for the deliberate 500 test.
@@ -1598,7 +1602,7 @@ Insert this command entry after watch_summary/wchs:
 Run:
 
 ~~~powershell
-mvn -pl zookeeper-server -Dtest=WatchManagerTest,DataTreeTest,CommandsTest,CommandAuthTest test
+mvn -pl zookeeper-server -Dtest=WatchManagerTest,DataTreeTest,CommandsTest test
 ~~~
 
 Expected: Maven exits 0 with no test failures.
@@ -1611,7 +1615,8 @@ Run:
 mvn -pl zookeeper-server test
 ~~~
 
-Expected: Maven exits 0 with BUILD SUCCESS and no failed tests.
+Expected: feature-related tests remain green. Record unrelated Windows baseline
+failures separately as described in the local verification notes above.
 
 - [ ] **Step 4: Run Checkstyle**
 

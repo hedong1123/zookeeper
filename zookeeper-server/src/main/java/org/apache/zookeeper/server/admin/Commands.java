@@ -76,9 +76,9 @@ import org.apache.zookeeper.server.quorum.QuorumPeer.LearnerType;
 import org.apache.zookeeper.server.quorum.QuorumZooKeeperServer;
 import org.apache.zookeeper.server.quorum.ReadOnlyZooKeeperServer;
 import org.apache.zookeeper.server.quorum.flexible.QuorumVerifier;
-import org.apache.zookeeper.server.watch.WatchRegistration;
 import org.apache.zookeeper.server.util.RateLimiter;
 import org.apache.zookeeper.server.util.ZxidUtils;
+import org.apache.zookeeper.server.watch.WatchRegistration;
 import org.eclipse.jetty.http.HttpStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -1173,11 +1173,6 @@ public class Commands {
 
             try {
                 return execute(zkServer, query);
-            } catch (UnsupportedOperationException e) {
-                return new CommandResponse(
-                    getPrimaryName(),
-                    "Watch details are not supported by the configured WatchManager",
-                    HttpServletResponse.SC_NOT_IMPLEMENTED);
             } catch (RuntimeException e) {
                 LOG.warn("Failed to query watch details", e);
                 return new CommandResponse(
@@ -1198,23 +1193,31 @@ public class Commands {
             }
 
             List<Map<String, Object>> watchDetails = new ArrayList<>();
-            if (!candidateSessionIds.isEmpty()) {
-                int maxResults = query.limit + 1;
-                DataTree dataTree = zkServer.getZKDatabase().getDataTree();
-                List<WatchRegistration> dataRegistrations = dataTree.getDataWatchRegistrations(
+            int maxResults = query.limit + 1;
+            DataTree dataTree = zkServer.getZKDatabase().getDataTree();
+            List<WatchRegistration> dataRegistrations;
+            try {
+                dataRegistrations = dataTree.getDataWatchRegistrations(
                     query.path,
                     candidateSessionIds,
                     maxResults);
-                appendWatchDetails(watchDetails, dataRegistrations, connections, "data");
+            } catch (UnsupportedOperationException e) {
+                return unsupportedWatchManagerResponse();
+            }
+            appendWatchDetails(watchDetails, dataRegistrations, connections, "data");
 
-                int remaining = maxResults - watchDetails.size();
-                if (remaining > 0) {
-                    List<WatchRegistration> childRegistrations = dataTree.getChildWatchRegistrations(
+            int remaining = maxResults - watchDetails.size();
+            if (remaining > 0) {
+                List<WatchRegistration> childRegistrations;
+                try {
+                    childRegistrations = dataTree.getChildWatchRegistrations(
                         query.path,
                         candidateSessionIds,
                         remaining);
-                    appendWatchDetails(watchDetails, childRegistrations, connections, "children");
+                } catch (UnsupportedOperationException e) {
+                    return unsupportedWatchManagerResponse();
                 }
+                appendWatchDetails(watchDetails, childRegistrations, connections, "children");
             }
 
             boolean truncated = watchDetails.size() > query.limit;
@@ -1227,6 +1230,13 @@ public class Commands {
             response.put("truncated", truncated);
             response.put("watches", watchDetails);
             return response;
+        }
+
+        private CommandResponse unsupportedWatchManagerResponse() {
+            return new CommandResponse(
+                getPrimaryName(),
+                "Watch details are not supported by the configured WatchManager",
+                HttpServletResponse.SC_NOT_IMPLEMENTED);
         }
 
         private static WatchDetailsQuery parseQuery(Map<String, String> kwargs) {
