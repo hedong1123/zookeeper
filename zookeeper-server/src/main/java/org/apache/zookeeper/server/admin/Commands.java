@@ -48,6 +48,7 @@ import org.apache.zookeeper.Environment.Entry;
 import org.apache.zookeeper.KeeperException;
 import org.apache.zookeeper.Version;
 import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.common.PathUtils;
 import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.data.Id;
 import org.apache.zookeeper.server.DataNode;
@@ -304,6 +305,7 @@ public class Commands {
         registerCommand(new SystemPropertiesCommand());
         registerCommand(new VotingViewCommand());
         registerCommand(new WatchCommand());
+        registerCommand(new WatchDetailsCommand());
         registerCommand(new WatchesByPathCommand());
         registerCommand(new WatchSummaryCommand());
         registerCommand(new ZabStateCommand());
@@ -1134,6 +1136,82 @@ public class Commands {
             CommandResponse response = initializeResponse();
             response.put("session_id_to_watched_paths", dt.getWatches().toMap());
             return response;
+        }
+
+    }
+
+    /**
+     * Detailed information about active watch registrations on this server.
+     */
+    public static class WatchDetailsCommand extends GetCommand {
+
+        private static final int DEFAULT_LIMIT = 100;
+        private static final int MIN_LIMIT = 1;
+        private static final int MAX_LIMIT = 1000;
+
+        public WatchDetailsCommand() {
+            super(
+                Arrays.asList("watch_details", "wchd"),
+                true,
+                new AuthRequest(ZooDefs.Perms.ALL, ROOT_PATH));
+        }
+
+        @Override
+        public CommandResponse runGet(ZooKeeperServer zkServer, Map<String, String> kwargs) {
+            try {
+                validateQuery(kwargs == null ? Collections.emptyMap() : kwargs);
+            } catch (IllegalArgumentException e) {
+                return new CommandResponse(getPrimaryName(), e.getMessage(), HttpServletResponse.SC_BAD_REQUEST);
+            }
+
+            CommandResponse response = initializeResponse();
+            response.put("server_id", zkServer.getServerId());
+            response.put("returned_count", 0);
+            response.put("truncated", false);
+            response.put("watches", Collections.emptyList());
+            return response;
+        }
+
+        private static void validateQuery(Map<String, String> kwargs) {
+            String path = kwargs.get("path");
+            if (path != null) {
+                try {
+                    PathUtils.validatePath(path);
+                } catch (IllegalArgumentException e) {
+                    throw new IllegalArgumentException("Invalid path: " + path);
+                }
+            }
+
+            String sessionId = kwargs.get("session_id");
+            if (sessionId != null) {
+                try {
+                    if (sessionId.startsWith("0x") || sessionId.startsWith("0X")) {
+                        Long.parseUnsignedLong(sessionId.substring(2), 16);
+                    } else {
+                        Long.parseUnsignedLong(sessionId);
+                    }
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("Invalid session_id: " + sessionId);
+                }
+            }
+
+            String clientIp = kwargs.get("client_ip");
+            if (clientIp != null && clientIp.trim().isEmpty()) {
+                throw new IllegalArgumentException("Invalid client_ip: value must not be empty");
+            }
+
+            String rawLimit = kwargs.get("limit");
+            int limit = DEFAULT_LIMIT;
+            if (rawLimit != null) {
+                try {
+                    limit = Integer.parseInt(rawLimit);
+                } catch (NumberFormatException e) {
+                    throw new IllegalArgumentException("Invalid limit: " + rawLimit);
+                }
+            }
+            if (limit < MIN_LIMIT || limit > MAX_LIMIT) {
+                throw new IllegalArgumentException("Invalid limit: value must be between 1 and 1000");
+            }
         }
 
     }
