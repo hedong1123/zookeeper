@@ -503,6 +503,20 @@ Available commands include:
   Summarized watch information.
   Returns "num_total_watches", "num_paths", and "num_connections".
 
+- _watch_details/wchd_ :
+  Returns Watch registration details for the current ZooKeeper server and
+  associates each result with its active client connection.
+  Requires AdminServer authentication and all permissions on the root znode.
+  Optional query parameters are "path" (exact znode path), "session_id"
+  (decimal or hexadecimal), "client_ip" (exact address), and "limit"
+  (1 through 1000, default 100). Multiple filters are combined with AND.
+  Returns "server_id", "returned_count", "truncated", and "watches".
+  Each Watch entry contains "path", "session_id", "client_ip", "client_port",
+  "watch_kind", "watch_mode", "connection_established_at",
+  "session_timeout_ms", and "secure".
+  Results are local to the queried server, are not ordered, and may reflect
+  concurrent Watch or connection changes during the query.
+
 - _zabstate_ :
   The current phase of Zab protocol that peer is running and whether it is a
   voting member.

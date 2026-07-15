@@ -316,7 +316,7 @@ public class WatchManagerOptimized implements IWatchManager, IDeadWatcherListene
             String path,
             Set<Long> sessionIds,
             int maxResults) {
-        if (maxResults <= 0) {
+        if (maxResults <= 0 || (sessionIds != null && sessionIds.isEmpty())) {
             return Collections.emptyList();
         }
         List<WatchRegistration> registrations = new ArrayList<>(Math.min(maxResults, 1024));

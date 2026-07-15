@@ -341,8 +341,16 @@ public class CommandsTest extends ClientBase {
 
     @Test
     public void testWatchDetailsQueryValidationAndEmptyResponse() {
-        ZooKeeperServer zkServer = mock(ZooKeeperServer.class);
-        when(zkServer.getServerId()).thenReturn(7L);
+        DataTree dataTree = mock(DataTree.class);
+        when(dataTree.getDataWatchRegistrations("/", Collections.emptySet(), 1001))
+            .thenReturn(Collections.emptyList());
+        when(dataTree.getChildWatchRegistrations("/", Collections.emptySet(), 1001))
+            .thenReturn(Collections.emptyList());
+        when(dataTree.getDataWatchRegistrations("/", Collections.emptySet(), 2))
+            .thenReturn(Collections.emptyList());
+        when(dataTree.getChildWatchRegistrations("/", Collections.emptySet(), 2))
+            .thenReturn(Collections.emptyList());
+        ZooKeeperServer zkServer = mockWatchDetailsServer(dataTree, null, null);
         Commands.WatchDetailsCommand command = new Commands.WatchDetailsCommand();
 
         assertWatchDetailsBadRequest(command, zkServer, "path", "relative", "Invalid path: relative");
@@ -600,6 +608,21 @@ public class CommandsTest extends ClientBase {
     }
 
     @Test
+    public void testWatchDetailsReturnsNotImplementedWithoutActiveConnections() {
+        DataTree dataTree = mock(DataTree.class);
+        when(dataTree.getDataWatchRegistrations(null, Collections.emptySet(), 101))
+            .thenThrow(new UnsupportedOperationException("Watch registration details are not supported"));
+        ZooKeeperServer zkServer = mockWatchDetailsServer(dataTree, null, null);
+
+        CommandResponse response = new Commands.WatchDetailsCommand().runGet(
+            zkServer,
+            Collections.emptyMap());
+
+        assertEquals(HttpServletResponse.SC_NOT_IMPLEMENTED, response.getStatusCode());
+        assertEquals("Watch details are not supported by the configured WatchManager", response.getError());
+    }
+
+    @Test
     public void testWatchDetailsReturnsInternalServerErrorForUnexpectedFailure() {
         DataTree dataTree = mock(DataTree.class);
         when(dataTree.getDataWatchRegistrations("/", Collections.singleton(0x77L), 101))
@@ -620,6 +643,21 @@ public class CommandsTest extends ClientBase {
         kwargs.put("path", "/");
 
         CommandResponse response = new Commands.WatchDetailsCommand().runGet(zkServer, kwargs);
+
+        assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, response.getStatusCode());
+        assertEquals("Failed to query watch details", response.getError());
+    }
+
+    @Test
+    public void testWatchDetailsDoesNotTreatConnectionFailureAsUnsupportedManager() {
+        ServerCnxnFactory factory = mock(ServerCnxnFactory.class);
+        when(factory.getConnections()).thenThrow(new UnsupportedOperationException("unexpected"));
+        ZooKeeperServer zkServer = mock(ZooKeeperServer.class);
+        when(zkServer.getServerCnxnFactory()).thenReturn(factory);
+
+        CommandResponse response = new Commands.WatchDetailsCommand().runGet(
+            zkServer,
+            Collections.emptyMap());
 
         assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, response.getStatusCode());
         assertEquals("Failed to query watch details", response.getError());
