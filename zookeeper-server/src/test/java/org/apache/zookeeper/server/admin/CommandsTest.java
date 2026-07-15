@@ -35,19 +35,28 @@ import static org.mockito.Mockito.when;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.zookeeper.ZooDefs;
 import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.metrics.MetricsUtils;
+import org.apache.zookeeper.server.DataTree;
+import org.apache.zookeeper.server.ServerCnxn;
 import org.apache.zookeeper.server.ServerCnxnFactory;
 import org.apache.zookeeper.server.ServerStats;
 import org.apache.zookeeper.server.ZKDatabase;
 import org.apache.zookeeper.server.ZooKeeperServer;
 import org.apache.zookeeper.server.quorum.BufferStats;
+import org.apache.zookeeper.server.watch.WatchManager;
+import org.apache.zookeeper.server.watch.WatchManagerFactory;
 import org.apache.zookeeper.test.ClientBase;
 import org.junit.jupiter.api.Test;
 
@@ -338,10 +347,10 @@ public class CommandsTest extends ClientBase {
 
         assertWatchDetailsBadRequest(command, zkServer, "path", "relative", "Invalid path: relative");
         assertWatchDetailsBadRequest(command, zkServer, "session_id", "not-a-session", "Invalid session_id: not-a-session");
-        assertWatchDetailsBadRequest(command, zkServer, "client_ip", "   ", "Invalid client_ip: value must not be empty");
-        assertWatchDetailsBadRequest(command, zkServer, "limit", "abc", "Invalid limit: abc");
-        assertWatchDetailsBadRequest(command, zkServer, "limit", "0", "Invalid limit: value must be between 1 and 1000");
-        assertWatchDetailsBadRequest(command, zkServer, "limit", "1001", "Invalid limit: value must be between 1 and 1000");
+        assertWatchDetailsBadRequest(command, zkServer, "client_ip", "   ", "client_ip must not be empty");
+        assertWatchDetailsBadRequest(command, zkServer, "limit", "abc", "limit must be an integer");
+        assertWatchDetailsBadRequest(command, zkServer, "limit", "0", "limit must be between 1 and 1000");
+        assertWatchDetailsBadRequest(command, zkServer, "limit", "1001", "limit must be between 1 and 1000");
 
         Map<String, String> kwargs = new HashMap<>();
         kwargs.put("path", "/");
@@ -394,6 +403,176 @@ public class CommandsTest extends ClientBase {
         }
     }
 
+    @Test
+    public void testWatchDetailsIncludesKindsModesAndConnectionFields() throws Exception {
+        DataTree dataTree = newWatchDetailsDataTree();
+        try {
+            ServerCnxn plain = mockWatchConnection(
+                0x11L,
+                "10.10.1.11",
+                5111,
+                1000L,
+                20000,
+                false,
+                new AtomicBoolean(false));
+            ServerCnxn secure = mockWatchConnection(
+                -1L,
+                "10.10.1.25",
+                51324,
+                1784112305123L,
+                30000,
+                true,
+                new AtomicBoolean(false));
+
+            dataTree.statNode("/", plain);
+            dataTree.getChildren("/", null, secure);
+            dataTree.addWatch("/persistent", secure, ZooDefs.AddWatchModes.persistent);
+            dataTree.addWatch("/recursive", secure, ZooDefs.AddWatchModes.persistentRecursive);
+
+            ZooKeeperServer zkServer = mockWatchDetailsServer(
+                dataTree,
+                Collections.singletonList(plain),
+                Collections.singletonList(secure));
+            Map<String, String> kwargs = new HashMap<>();
+            kwargs.put("limit", "1000");
+            CommandResponse response = new Commands.WatchDetailsCommand().runGet(zkServer, kwargs);
+            List<Map<String, Object>> watches = watchDetails(response);
+
+            assertEquals(5, watches.size());
+            Map<String, Object> plainWatch = findWatch(watches, "/", "data");
+            assertEquals("0x11", plainWatch.get("session_id"));
+            assertEquals("10.10.1.11", plainWatch.get("client_ip"));
+            assertEquals(5111, plainWatch.get("client_port"));
+            assertEquals("standard", plainWatch.get("watch_mode"));
+            assertEquals(1000L, plainWatch.get("connection_established_at"));
+            assertEquals(20000, plainWatch.get("session_timeout_ms"));
+            assertEquals(false, plainWatch.get("secure"));
+
+            Map<String, Object> recursiveWatch = findWatch(watches, "/recursive", "data");
+            assertEquals("0xffffffffffffffff", recursiveWatch.get("session_id"));
+            assertEquals("persistent_recursive", recursiveWatch.get("watch_mode"));
+            assertEquals(true, recursiveWatch.get("secure"));
+
+            kwargs.put("path", "/persistent");
+            kwargs.put("session_id", "0xffffffffffffffff");
+            kwargs.put("client_ip", "10.10.1.25");
+            watches = watchDetails(new Commands.WatchDetailsCommand().runGet(zkServer, kwargs));
+            assertEquals(2, watches.size());
+            assertEquals("persistent", findWatch(watches, "/persistent", "data").get("watch_mode"));
+            assertEquals("persistent", findWatch(watches, "/persistent", "children").get("watch_mode"));
+
+            kwargs.remove("path");
+            kwargs.put("session_id", "18446744073709551615");
+            assertEquals(4, watchDetails(new Commands.WatchDetailsCommand().runGet(zkServer, kwargs)).size());
+        } finally {
+            dataTree.shutdownWatcher();
+        }
+    }
+
+    @Test
+    public void testWatchDetailsUsesNewestConnectionAndFiltersInactiveWatches() throws Exception {
+        DataTree dataTree = newWatchDetailsDataTree();
+        try {
+            ServerCnxn oldConnection = mockWatchConnection(
+                0x22L,
+                "10.10.2.1",
+                5201,
+                1000L,
+                20000,
+                false,
+                new AtomicBoolean(false));
+            ServerCnxn newConnection = mockWatchConnection(
+                0x22L,
+                "10.10.2.2",
+                5202,
+                2000L,
+                30000,
+                false,
+                new AtomicBoolean(false));
+            AtomicBoolean staleState = new AtomicBoolean(false);
+            ServerCnxn staleConnection = mockWatchConnection(
+                0x33L,
+                "10.10.3.3",
+                5303,
+                3000L,
+                30000,
+                false,
+                staleState);
+            ServerCnxn disconnected = mockWatchConnection(
+                0x44L,
+                "10.10.4.4",
+                5404,
+                4000L,
+                30000,
+                false,
+                new AtomicBoolean(false));
+
+            dataTree.statNode("/", oldConnection);
+            dataTree.addWatch("/stale", staleConnection, ZooDefs.AddWatchModes.persistentRecursive);
+            dataTree.addWatch("/disconnected", disconnected, ZooDefs.AddWatchModes.persistentRecursive);
+            staleState.set(true);
+
+            ZooKeeperServer zkServer = mockWatchDetailsServer(
+                dataTree,
+                Arrays.asList(oldConnection, newConnection, staleConnection),
+                null);
+            Map<String, String> kwargs = new HashMap<>();
+            kwargs.put("session_id", "34");
+            kwargs.put("client_ip", "10.10.2.2");
+            List<Map<String, Object>> watches = watchDetails(
+                new Commands.WatchDetailsCommand().runGet(zkServer, kwargs));
+
+            assertEquals(1, watches.size());
+            Map<String, Object> watch = watches.get(0);
+            assertEquals("10.10.2.2", watch.get("client_ip"));
+            assertEquals(5202, watch.get("client_port"));
+            assertEquals(2000L, watch.get("connection_established_at"));
+            assertEquals(30000, watch.get("session_timeout_ms"));
+
+            watches = watchDetails(new Commands.WatchDetailsCommand().runGet(zkServer, new HashMap<>()));
+            assertEquals(1, watches.size());
+            assertEquals("/", watches.get(0).get("path"));
+        } finally {
+            dataTree.shutdownWatcher();
+        }
+    }
+
+    @Test
+    public void testWatchDetailsLimitAndTruncation() {
+        DataTree dataTree = newWatchDetailsDataTree();
+        try {
+            ServerCnxn connection = mockWatchConnection(
+                0x55L,
+                "10.10.5.5",
+                5505,
+                5000L,
+                30000,
+                false,
+                new AtomicBoolean(false));
+            for (int i = 0; i < 101; i++) {
+                dataTree.addWatch("/watch-" + i, connection, ZooDefs.AddWatchModes.persistentRecursive);
+            }
+            ZooKeeperServer zkServer = mockWatchDetailsServer(
+                dataTree,
+                Collections.singletonList(connection),
+                null);
+
+            CommandResponse response = new Commands.WatchDetailsCommand().runGet(zkServer, new HashMap<>());
+            assertEquals(100, response.toMap().get("returned_count"));
+            assertEquals(true, response.toMap().get("truncated"));
+            assertEquals(100, watchDetails(response).size());
+
+            Map<String, String> kwargs = new HashMap<>();
+            kwargs.put("limit", "1000");
+            response = new Commands.WatchDetailsCommand().runGet(zkServer, kwargs);
+            assertEquals(101, response.toMap().get("returned_count"));
+            assertEquals(false, response.toMap().get("truncated"));
+            assertEquals(101, watchDetails(response).size());
+        } finally {
+            dataTree.shutdownWatcher();
+        }
+    }
+
     private void assertWatchDetailsBadRequest(
             Commands.WatchDetailsCommand command,
             ZooKeeperServer zkServer,
@@ -407,6 +586,78 @@ public class CommandsTest extends ClientBase {
 
         assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getStatusCode());
         assertEquals(expectedError, response.getError());
+    }
+
+    private static DataTree newWatchDetailsDataTree() {
+        String property = WatchManagerFactory.ZOOKEEPER_WATCH_MANAGER_NAME;
+        String previous = System.getProperty(property);
+        System.setProperty(property, WatchManager.class.getName());
+        try {
+            return new DataTree();
+        } finally {
+            if (previous == null) {
+                System.clearProperty(property);
+            } else {
+                System.setProperty(property, previous);
+            }
+        }
+    }
+
+    private static ServerCnxn mockWatchConnection(
+            long sessionId,
+            String clientIp,
+            int clientPort,
+            long establishedAt,
+            int sessionTimeout,
+            boolean secure,
+            AtomicBoolean stale) {
+        ServerCnxn connection = mock(ServerCnxn.class);
+        when(connection.getSessionId()).thenReturn(sessionId);
+        when(connection.getRemoteSocketAddress()).thenReturn(new InetSocketAddress(clientIp, clientPort));
+        when(connection.getEstablished()).thenReturn(new Date(establishedAt));
+        when(connection.getSessionTimeout()).thenReturn(sessionTimeout);
+        when(connection.isSecure()).thenReturn(secure);
+        when(connection.isStale()).thenAnswer(invocation -> stale.get());
+        return connection;
+    }
+
+    private static ZooKeeperServer mockWatchDetailsServer(
+            DataTree dataTree,
+            Iterable<ServerCnxn> plainConnections,
+            Iterable<ServerCnxn> secureConnections) {
+        ZooKeeperServer zkServer = mock(ZooKeeperServer.class);
+        ZKDatabase zkDatabase = mock(ZKDatabase.class);
+        when(zkServer.getServerId()).thenReturn(7L);
+        when(zkServer.getZKDatabase()).thenReturn(zkDatabase);
+        when(zkDatabase.getDataTree()).thenReturn(dataTree);
+        if (plainConnections != null) {
+            ServerCnxnFactory factory = mock(ServerCnxnFactory.class);
+            when(factory.getConnections()).thenReturn(plainConnections);
+            when(zkServer.getServerCnxnFactory()).thenReturn(factory);
+        }
+        if (secureConnections != null) {
+            ServerCnxnFactory factory = mock(ServerCnxnFactory.class);
+            when(factory.getConnections()).thenReturn(secureConnections);
+            when(zkServer.getSecureServerCnxnFactory()).thenReturn(factory);
+        }
+        return zkServer;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> watchDetails(CommandResponse response) {
+        return (List<Map<String, Object>>) response.toMap().get("watches");
+    }
+
+    private static Map<String, Object> findWatch(
+            List<Map<String, Object>> watches,
+            String path,
+            String watchKind) {
+        for (Map<String, Object> watch : watches) {
+            if (path.equals(watch.get("path")) && watchKind.equals(watch.get("watch_kind"))) {
+                return watch;
+            }
+        }
+        throw new AssertionError("Watch not found for path " + path + " and kind " + watchKind);
     }
 
     @Test

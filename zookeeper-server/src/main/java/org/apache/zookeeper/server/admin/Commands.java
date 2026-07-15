@@ -29,11 +29,15 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
@@ -53,6 +57,7 @@ import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.data.Id;
 import org.apache.zookeeper.server.DataNode;
 import org.apache.zookeeper.server.DataTree;
+import org.apache.zookeeper.server.ServerCnxn;
 import org.apache.zookeeper.server.ServerCnxnFactory;
 import org.apache.zookeeper.server.ServerMetrics;
 import org.apache.zookeeper.server.ZooKeeperServer;
@@ -71,6 +76,7 @@ import org.apache.zookeeper.server.quorum.QuorumPeer.LearnerType;
 import org.apache.zookeeper.server.quorum.QuorumZooKeeperServer;
 import org.apache.zookeeper.server.quorum.ReadOnlyZooKeeperServer;
 import org.apache.zookeeper.server.quorum.flexible.QuorumVerifier;
+import org.apache.zookeeper.server.watch.WatchRegistration;
 import org.apache.zookeeper.server.util.RateLimiter;
 import org.apache.zookeeper.server.util.ZxidUtils;
 import org.eclipse.jetty.http.HttpStatus;
@@ -1158,21 +1164,55 @@ public class Commands {
 
         @Override
         public CommandResponse runGet(ZooKeeperServer zkServer, Map<String, String> kwargs) {
+            WatchDetailsQuery query;
             try {
-                validateQuery(kwargs == null ? Collections.emptyMap() : kwargs);
+                query = parseQuery(kwargs == null ? Collections.emptyMap() : kwargs);
             } catch (IllegalArgumentException e) {
                 return new CommandResponse(getPrimaryName(), e.getMessage(), HttpServletResponse.SC_BAD_REQUEST);
             }
 
+            Map<Long, ConnectionSnapshot> connections = snapshotConnections(zkServer);
+            Set<Long> candidateSessionIds = new HashSet<>();
+            for (ConnectionSnapshot connection : connections.values()) {
+                if ((query.sessionId == null || query.sessionId == connection.sessionId)
+                        && (query.clientIp == null || query.clientIp.equals(connection.clientIp))) {
+                    candidateSessionIds.add(connection.sessionId);
+                }
+            }
+
+            List<Map<String, Object>> watchDetails = new ArrayList<>();
+            if (!candidateSessionIds.isEmpty()) {
+                int maxResults = query.limit + 1;
+                DataTree dataTree = zkServer.getZKDatabase().getDataTree();
+                List<WatchRegistration> dataRegistrations = dataTree.getDataWatchRegistrations(
+                    query.path,
+                    candidateSessionIds,
+                    maxResults);
+                appendWatchDetails(watchDetails, dataRegistrations, connections, "data");
+
+                int remaining = maxResults - watchDetails.size();
+                if (remaining > 0) {
+                    List<WatchRegistration> childRegistrations = dataTree.getChildWatchRegistrations(
+                        query.path,
+                        candidateSessionIds,
+                        remaining);
+                    appendWatchDetails(watchDetails, childRegistrations, connections, "children");
+                }
+            }
+
+            boolean truncated = watchDetails.size() > query.limit;
+            if (truncated) {
+                watchDetails = new ArrayList<>(watchDetails.subList(0, query.limit));
+            }
             CommandResponse response = initializeResponse();
             response.put("server_id", zkServer.getServerId());
-            response.put("returned_count", 0);
-            response.put("truncated", false);
-            response.put("watches", Collections.emptyList());
+            response.put("returned_count", watchDetails.size());
+            response.put("truncated", truncated);
+            response.put("watches", watchDetails);
             return response;
         }
 
-        private static void validateQuery(Map<String, String> kwargs) {
+        private static WatchDetailsQuery parseQuery(Map<String, String> kwargs) {
             String path = kwargs.get("path");
             if (path != null) {
                 try {
@@ -1183,12 +1223,13 @@ public class Commands {
             }
 
             String sessionId = kwargs.get("session_id");
+            Long parsedSessionId = null;
             if (sessionId != null) {
                 try {
                     if (sessionId.startsWith("0x") || sessionId.startsWith("0X")) {
-                        Long.parseUnsignedLong(sessionId.substring(2), 16);
+                        parsedSessionId = Long.parseUnsignedLong(sessionId.substring(2), 16);
                     } else {
-                        Long.parseUnsignedLong(sessionId);
+                        parsedSessionId = Long.parseUnsignedLong(sessionId);
                     }
                 } catch (NumberFormatException e) {
                     throw new IllegalArgumentException("Invalid session_id: " + sessionId);
@@ -1197,8 +1238,9 @@ public class Commands {
 
             String clientIp = kwargs.get("client_ip");
             if (clientIp != null && clientIp.trim().isEmpty()) {
-                throw new IllegalArgumentException("Invalid client_ip: value must not be empty");
+                throw new IllegalArgumentException("client_ip must not be empty");
             }
+            clientIp = clientIp == null ? null : clientIp.trim();
 
             String rawLimit = kwargs.get("limit");
             int limit = DEFAULT_LIMIT;
@@ -1206,11 +1248,123 @@ public class Commands {
                 try {
                     limit = Integer.parseInt(rawLimit);
                 } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException("Invalid limit: " + rawLimit);
+                    throw new IllegalArgumentException("limit must be an integer");
                 }
             }
             if (limit < MIN_LIMIT || limit > MAX_LIMIT) {
-                throw new IllegalArgumentException("Invalid limit: value must be between 1 and 1000");
+                throw new IllegalArgumentException("limit must be between 1 and 1000");
+            }
+            return new WatchDetailsQuery(path, parsedSessionId, clientIp, limit);
+        }
+
+        private static Map<Long, ConnectionSnapshot> snapshotConnections(ZooKeeperServer zkServer) {
+            Map<Long, ConnectionSnapshot> snapshots = new HashMap<>();
+            addConnectionSnapshots(snapshots, zkServer.getServerCnxnFactory());
+            addConnectionSnapshots(snapshots, zkServer.getSecureServerCnxnFactory());
+            return snapshots;
+        }
+
+        private static void addConnectionSnapshots(
+                Map<Long, ConnectionSnapshot> snapshots,
+                ServerCnxnFactory factory) {
+            if (factory == null) {
+                return;
+            }
+            Iterable<ServerCnxn> connections = factory.getConnections();
+            if (connections == null) {
+                return;
+            }
+            for (ServerCnxn connection : connections) {
+                if (connection == null || connection.isStale() || connection.getSessionId() == 0) {
+                    continue;
+                }
+                InetSocketAddress remoteAddress = connection.getRemoteSocketAddress();
+                if (remoteAddress == null || remoteAddress.getAddress() == null) {
+                    continue;
+                }
+                String clientIp = remoteAddress.getAddress().getHostAddress();
+                Date established = connection.getEstablished();
+                if (clientIp == null || clientIp.isEmpty() || established == null) {
+                    continue;
+                }
+                ConnectionSnapshot snapshot = new ConnectionSnapshot(
+                    connection.getSessionId(),
+                    clientIp,
+                    remoteAddress.getPort(),
+                    established.getTime(),
+                    connection.getSessionTimeout(),
+                    connection.isSecure());
+                if (connection.isStale()) {
+                    continue;
+                }
+                ConnectionSnapshot current = snapshots.get(snapshot.sessionId);
+                if (current == null || snapshot.establishedAt > current.establishedAt) {
+                    snapshots.put(snapshot.sessionId, snapshot);
+                }
+            }
+        }
+
+        private static void appendWatchDetails(
+                List<Map<String, Object>> watchDetails,
+                List<WatchRegistration> registrations,
+                Map<Long, ConnectionSnapshot> connections,
+                String watchKind) {
+            for (WatchRegistration registration : registrations) {
+                ConnectionSnapshot connection = connections.get(registration.getSessionId());
+                if (connection == null) {
+                    continue;
+                }
+                Map<String, Object> detail = new LinkedHashMap<>();
+                detail.put("path", registration.getPath());
+                detail.put("session_id", "0x" + Long.toHexString(connection.sessionId));
+                detail.put("client_ip", connection.clientIp);
+                detail.put("client_port", connection.clientPort);
+                detail.put("watch_kind", watchKind);
+                detail.put("watch_mode", registration.getWatcherMode().name().toLowerCase(Locale.ROOT));
+                detail.put("connection_established_at", connection.establishedAt);
+                detail.put("session_timeout_ms", connection.sessionTimeout);
+                detail.put("secure", connection.secure);
+                watchDetails.add(detail);
+            }
+        }
+
+        private static final class WatchDetailsQuery {
+
+            private final String path;
+            private final Long sessionId;
+            private final String clientIp;
+            private final int limit;
+
+            private WatchDetailsQuery(String path, Long sessionId, String clientIp, int limit) {
+                this.path = path;
+                this.sessionId = sessionId;
+                this.clientIp = clientIp;
+                this.limit = limit;
+            }
+        }
+
+        private static final class ConnectionSnapshot {
+
+            private final long sessionId;
+            private final String clientIp;
+            private final int clientPort;
+            private final long establishedAt;
+            private final int sessionTimeout;
+            private final boolean secure;
+
+            private ConnectionSnapshot(
+                    long sessionId,
+                    String clientIp,
+                    int clientPort,
+                    long establishedAt,
+                    int sessionTimeout,
+                    boolean secure) {
+                this.sessionId = sessionId;
+                this.clientIp = clientIp;
+                this.clientPort = clientPort;
+                this.establishedAt = establishedAt;
+                this.sessionTimeout = sessionTimeout;
+                this.secure = secure;
             }
         }
 
