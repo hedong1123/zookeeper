@@ -28,6 +28,7 @@ import static org.hamcrest.core.Is.is;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -39,6 +40,8 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import javax.servlet.http.HttpServletResponse;
+import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.metrics.MetricsUtils;
 import org.apache.zookeeper.server.ServerCnxnFactory;
 import org.apache.zookeeper.server.ServerStats;
@@ -312,6 +315,98 @@ public class CommandsTest extends ClientBase {
     @Test
     public void testWatchSummary() throws IOException, InterruptedException {
         testCommand("watch_summary", new Field("num_connections", Integer.class), new Field("num_paths", Integer.class), new Field("num_total_watches", Integer.class));
+    }
+
+    @Test
+    public void testWatchDetailsRegistrationAndAuthorizationMetadata() {
+        Command command = Commands.getCommand("watch_details");
+
+        assertNotNull(command);
+        assertSame(command, Commands.getCommand("wchd"));
+        assertEquals("watch_details", command.getPrimaryName());
+        assertTrue(Commands.getPrimaryNames().contains("watch_details"));
+        assertNotNull(command.getAuthRequest());
+        assertEquals(ZooDefs.Perms.ALL, command.getAuthRequest().getPermission());
+        assertEquals(Commands.ROOT_PATH, command.getAuthRequest().getPath());
+    }
+
+    @Test
+    public void testWatchDetailsQueryValidationAndEmptyResponse() {
+        ZooKeeperServer zkServer = mock(ZooKeeperServer.class);
+        when(zkServer.getServerId()).thenReturn(7L);
+        Commands.WatchDetailsCommand command = new Commands.WatchDetailsCommand();
+
+        assertWatchDetailsBadRequest(command, zkServer, "path", "relative", "Invalid path: relative");
+        assertWatchDetailsBadRequest(command, zkServer, "session_id", "not-a-session", "Invalid session_id: not-a-session");
+        assertWatchDetailsBadRequest(command, zkServer, "client_ip", "   ", "Invalid client_ip: value must not be empty");
+        assertWatchDetailsBadRequest(command, zkServer, "limit", "abc", "Invalid limit: abc");
+        assertWatchDetailsBadRequest(command, zkServer, "limit", "0", "Invalid limit: value must be between 1 and 1000");
+        assertWatchDetailsBadRequest(command, zkServer, "limit", "1001", "Invalid limit: value must be between 1 and 1000");
+
+        Map<String, String> kwargs = new HashMap<>();
+        kwargs.put("path", "/");
+        kwargs.put("session_id", "0xffffffffffffffff");
+        kwargs.put("client_ip", "127.0.0.1");
+        kwargs.put("limit", "1000");
+        CommandResponse response = command.runGet(zkServer, kwargs);
+
+        assertEquals(HttpServletResponse.SC_OK, response.getStatusCode());
+        assertEquals(7L, response.toMap().get("server_id"));
+        assertEquals(0, response.toMap().get("returned_count"));
+        assertEquals(false, response.toMap().get("truncated"));
+        assertEquals(new ArrayList<>(), response.toMap().get("watches"));
+
+        kwargs.put("limit", "1");
+        assertEquals(HttpServletResponse.SC_OK, command.runGet(zkServer, kwargs).getStatusCode());
+    }
+
+    @Test
+    public void testWatchDetailsAuthorization() throws Exception {
+        ZooKeeperServer zkServer = serverFactory.getZooKeeperServer();
+        CommandResponse missingAuth = Commands.runGetCommand("watch_details", zkServer, new HashMap<>(), null, null);
+        assertEquals(HttpServletResponse.SC_UNAUTHORIZED, missingAuth.getStatusCode());
+
+        ZooKeeper zk = createClient();
+        try {
+            zk.setACL(Commands.ROOT_PATH, CommandAuthTest.genACLForDigest(), -1);
+
+            String invalidAuth = "digest" + Commands.AUTH_INFO_SEPARATOR + "InvalidUser:InvalidPassword";
+            CommandResponse forbidden = Commands.runGetCommand(
+                "watch_details",
+                zkServer,
+                new HashMap<>(),
+                invalidAuth,
+                null);
+            assertEquals(HttpServletResponse.SC_FORBIDDEN, forbidden.getStatusCode());
+
+            CommandResponse allowed = Commands.runGetCommand(
+                "watch_details",
+                zkServer,
+                new HashMap<>(),
+                CommandAuthTest.buildAuthorizationForDigest(),
+                null);
+            assertEquals(HttpServletResponse.SC_OK, allowed.getStatusCode());
+            assertNull(allowed.getError());
+        } finally {
+            CommandAuthTest.addAuthInfoForDigest(zk);
+            CommandAuthTest.resetRootACL(zk);
+            zk.close();
+        }
+    }
+
+    private void assertWatchDetailsBadRequest(
+            Commands.WatchDetailsCommand command,
+            ZooKeeperServer zkServer,
+            String key,
+            String value,
+            String expectedError) {
+        Map<String, String> kwargs = new HashMap<>();
+        kwargs.put(key, value);
+
+        CommandResponse response = command.runGet(zkServer, kwargs);
+
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getStatusCode());
+        assertEquals(expectedError, response.getError());
     }
 
     @Test
