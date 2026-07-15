@@ -19,7 +19,9 @@
 package org.apache.zookeeper.server.watch;
 
 import java.io.PrintWriter;
+import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -307,6 +309,60 @@ public class WatchManagerOptimized implements IWatchManager, IDeadWatcherListene
     @Override
     public WatchesSummary getWatchesSummary() {
         return new WatchesSummary(watcherBitIdMap.size(), pathSize(), size());
+    }
+
+    @Override
+    public List<WatchRegistration> getWatchRegistrations(
+            String path,
+            Set<Long> sessionIds,
+            int maxResults) {
+        if (maxResults <= 0) {
+            return Collections.emptyList();
+        }
+        List<WatchRegistration> registrations = new ArrayList<>(Math.min(maxResults, 1024));
+        if (path != null) {
+            collectWatchRegistrations(path, pathWatches.get(path), sessionIds, maxResults, registrations);
+            return registrations;
+        }
+        for (Entry<String, BitHashSet> entry : pathWatches.entrySet()) {
+            if (collectWatchRegistrations(
+                    entry.getKey(),
+                    entry.getValue(),
+                    sessionIds,
+                    maxResults,
+                    registrations)) {
+                break;
+            }
+        }
+        return registrations;
+    }
+
+    private boolean collectWatchRegistrations(
+            String path,
+            BitHashSet watchers,
+            Set<Long> sessionIds,
+            int maxResults,
+            List<WatchRegistration> registrations) {
+        if (watchers == null) {
+            return false;
+        }
+        synchronized (watchers) {
+            for (Integer watcherBit : watchers) {
+                Watcher watcher = watcherBitIdMap.get(watcherBit);
+                if (!(watcher instanceof ServerCnxn) || isDeadWatcher(watcher)) {
+                    continue;
+                }
+                long sessionId = ((ServerCnxn) watcher).getSessionId();
+                if (sessionId == 0 || (sessionIds != null && !sessionIds.contains(sessionId))) {
+                    continue;
+                }
+                registrations.add(new WatchRegistration(path, sessionId, WatcherMode.STANDARD));
+                if (registrations.size() >= maxResults) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     @Override

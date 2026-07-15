@@ -143,6 +143,38 @@ public class WatchManagerTest extends ZKTestCase {
         assertEquals(1, registrations.size());
     }
 
+    @Test
+    public void testOptimizedGetWatchRegistrationsFiltersAndStopsEarly() {
+        WatchManagerOptimized manager = new WatchManagerOptimized();
+        try {
+            ServerCnxn active = mock(ServerCnxn.class);
+            when(active.getSessionId()).thenReturn(0x44L);
+            when(active.isStale()).thenReturn(false);
+
+            AtomicBoolean stale = new AtomicBoolean(false);
+            ServerCnxn staleConnection = mock(ServerCnxn.class);
+            when(staleConnection.getSessionId()).thenReturn(0x44L);
+            when(staleConnection.isStale()).thenAnswer(invocation -> stale.get());
+
+            manager.addWatch("/node1", active);
+            manager.addWatch("/node2", active);
+            manager.addWatch("/node1", staleConnection);
+            stale.set(true);
+
+            List<WatchRegistration> registrations = manager.getWatchRegistrations(
+                "/node1",
+                java.util.Collections.singleton(0x44L),
+                1);
+
+            assertEquals(1, registrations.size());
+            assertEquals("/node1", registrations.get(0).getPath());
+            assertEquals(0x44L, registrations.get(0).getSessionId());
+            assertEquals(WatcherMode.STANDARD, registrations.get(0).getWatcherMode());
+        } finally {
+            manager.shutdown();
+        }
+    }
+
     public class AddWatcherWorker extends Thread {
 
         private final IWatchManager manager;
