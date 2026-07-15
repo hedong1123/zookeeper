@@ -573,6 +573,58 @@ public class CommandsTest extends ClientBase {
         }
     }
 
+    @Test
+    public void testWatchDetailsReturnsNotImplementedForUnsupportedManager() {
+        DataTree dataTree = mock(DataTree.class);
+        when(dataTree.getDataWatchRegistrations("/", Collections.singleton(0x66L), 101))
+            .thenThrow(new UnsupportedOperationException("Watch registration details are not supported"));
+        ServerCnxn connection = mockWatchConnection(
+            0x66L,
+            "10.10.6.6",
+            5606,
+            6000L,
+            30000,
+            false,
+            new AtomicBoolean(false));
+        ZooKeeperServer zkServer = mockWatchDetailsServer(
+            dataTree,
+            Collections.singletonList(connection),
+            null);
+        Map<String, String> kwargs = new HashMap<>();
+        kwargs.put("path", "/");
+
+        CommandResponse response = new Commands.WatchDetailsCommand().runGet(zkServer, kwargs);
+
+        assertEquals(HttpServletResponse.SC_NOT_IMPLEMENTED, response.getStatusCode());
+        assertEquals("Watch details are not supported by the configured WatchManager", response.getError());
+    }
+
+    @Test
+    public void testWatchDetailsReturnsInternalServerErrorForUnexpectedFailure() {
+        DataTree dataTree = mock(DataTree.class);
+        when(dataTree.getDataWatchRegistrations("/", Collections.singleton(0x77L), 101))
+            .thenThrow(new IllegalStateException("unexpected"));
+        ServerCnxn connection = mockWatchConnection(
+            0x77L,
+            "10.10.7.7",
+            5707,
+            7000L,
+            30000,
+            false,
+            new AtomicBoolean(false));
+        ZooKeeperServer zkServer = mockWatchDetailsServer(
+            dataTree,
+            Collections.singletonList(connection),
+            null);
+        Map<String, String> kwargs = new HashMap<>();
+        kwargs.put("path", "/");
+
+        CommandResponse response = new Commands.WatchDetailsCommand().runGet(zkServer, kwargs);
+
+        assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, response.getStatusCode());
+        assertEquals("Failed to query watch details", response.getError());
+    }
+
     private void assertWatchDetailsBadRequest(
             Commands.WatchDetailsCommand command,
             ZooKeeperServer zkServer,

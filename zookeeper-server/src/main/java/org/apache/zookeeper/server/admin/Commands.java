@@ -1171,6 +1171,23 @@ public class Commands {
                 return new CommandResponse(getPrimaryName(), e.getMessage(), HttpServletResponse.SC_BAD_REQUEST);
             }
 
+            try {
+                return execute(zkServer, query);
+            } catch (UnsupportedOperationException e) {
+                return new CommandResponse(
+                    getPrimaryName(),
+                    "Watch details are not supported by the configured WatchManager",
+                    HttpServletResponse.SC_NOT_IMPLEMENTED);
+            } catch (RuntimeException e) {
+                LOG.warn("Failed to query watch details", e);
+                return new CommandResponse(
+                    getPrimaryName(),
+                    "Failed to query watch details",
+                    HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+            }
+        }
+
+        private CommandResponse execute(ZooKeeperServer zkServer, WatchDetailsQuery query) {
             Map<Long, ConnectionSnapshot> connections = snapshotConnections(zkServer);
             Set<Long> candidateSessionIds = new HashSet<>();
             for (ConnectionSnapshot connection : connections.values()) {
