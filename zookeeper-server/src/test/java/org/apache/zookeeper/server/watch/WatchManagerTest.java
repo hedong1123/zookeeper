@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -29,6 +31,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 import org.apache.zookeeper.Watcher;
@@ -80,6 +83,64 @@ public class WatchManagerTest extends ZKTestCase {
             watchers.putIfAbsent(watcherId, watcher);
         }
         return watchers.get(watcherId);
+    }
+
+    @Test
+    public void testGetWatchRegistrationsExpandsModesAndFilters() {
+        WatchManager manager = new WatchManager();
+        ServerCnxn active = mock(ServerCnxn.class);
+        when(active.getSessionId()).thenReturn(0x11L);
+        when(active.isStale()).thenReturn(false);
+
+        ServerCnxn otherSession = mock(ServerCnxn.class);
+        when(otherSession.getSessionId()).thenReturn(0x22L);
+        when(otherSession.isStale()).thenReturn(false);
+
+        AtomicBoolean stale = new AtomicBoolean(false);
+        ServerCnxn staleConnection = mock(ServerCnxn.class);
+        when(staleConnection.getSessionId()).thenReturn(0x11L);
+        when(staleConnection.isStale()).thenAnswer(invocation -> stale.get());
+
+        manager.addWatch("/node1", active, WatcherMode.STANDARD);
+        manager.addWatch("/node1", active, WatcherMode.PERSISTENT);
+        manager.addWatch("/node1", active, WatcherMode.PERSISTENT_RECURSIVE);
+        manager.addWatch("/node2", active, WatcherMode.STANDARD);
+        manager.addWatch("/node1", otherSession, WatcherMode.STANDARD);
+        manager.addWatch("/node1", staleConnection, WatcherMode.STANDARD);
+        stale.set(true);
+
+        List<WatchRegistration> registrations = manager.getWatchRegistrations(
+            "/node1",
+            java.util.Collections.singleton(0x11L),
+            10);
+
+        assertEquals(3, registrations.size());
+        Set<WatcherMode> modes = new HashSet<>();
+        for (WatchRegistration registration : registrations) {
+            assertEquals("/node1", registration.getPath());
+            assertEquals(0x11L, registration.getSessionId());
+            modes.add(registration.getWatcherMode());
+        }
+        assertEquals(
+            new HashSet<>(java.util.Arrays.asList(
+                WatcherMode.STANDARD,
+                WatcherMode.PERSISTENT,
+                WatcherMode.PERSISTENT_RECURSIVE)),
+            modes);
+    }
+
+    @Test
+    public void testGetWatchRegistrationsStopsAtMaxResults() {
+        WatchManager manager = new WatchManager();
+        ServerCnxn connection = mock(ServerCnxn.class);
+        when(connection.getSessionId()).thenReturn(0x33L);
+        when(connection.isStale()).thenReturn(false);
+        manager.addWatch("/node1", connection);
+        manager.addWatch("/node2", connection);
+
+        List<WatchRegistration> registrations = manager.getWatchRegistrations(null, null, 1);
+
+        assertEquals(1, registrations.size());
     }
 
     public class AddWatcherWorker extends Thread {
