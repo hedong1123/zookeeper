@@ -1158,8 +1158,7 @@ public class Commands {
         public WatchDetailsCommand() {
             super(
                 Arrays.asList("watch_details", "wchd"),
-                true,
-                new AuthRequest(ZooDefs.Perms.ALL, ROOT_PATH));
+                true);
         }
 
         @Override
