@@ -46,7 +46,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.zookeeper.ZooDefs;
-import org.apache.zookeeper.ZooKeeper;
 import org.apache.zookeeper.metrics.MetricsUtils;
 import org.apache.zookeeper.server.DataTree;
 import org.apache.zookeeper.server.ServerCnxn;
@@ -327,16 +326,14 @@ public class CommandsTest extends ClientBase {
     }
 
     @Test
-    public void testWatchDetailsRegistrationAndAuthorizationMetadata() {
+    public void testWatchDetailsRegistrationMetadata() {
         Command command = Commands.getCommand("watch_details");
 
         assertNotNull(command);
         assertSame(command, Commands.getCommand("wchd"));
         assertEquals("watch_details", command.getPrimaryName());
         assertTrue(Commands.getPrimaryNames().contains("watch_details"));
-        assertNotNull(command.getAuthRequest());
-        assertEquals(ZooDefs.Perms.ALL, command.getAuthRequest().getPermission());
-        assertEquals(Commands.ROOT_PATH, command.getAuthRequest().getPath());
+        assertNull(command.getAuthRequest());
     }
 
     @Test
@@ -378,37 +375,17 @@ public class CommandsTest extends ClientBase {
     }
 
     @Test
-    public void testWatchDetailsAuthorization() throws Exception {
+    public void testWatchDetailsDoesNotRequireAuthorization() {
         ZooKeeperServer zkServer = serverFactory.getZooKeeperServer();
-        CommandResponse missingAuth = Commands.runGetCommand("watch_details", zkServer, new HashMap<>(), null, null);
-        assertEquals(HttpServletResponse.SC_UNAUTHORIZED, missingAuth.getStatusCode());
+        CommandResponse response = Commands.runGetCommand(
+            "watch_details",
+            zkServer,
+            new HashMap<>(),
+            null,
+            null);
 
-        ZooKeeper zk = createClient();
-        try {
-            zk.setACL(Commands.ROOT_PATH, CommandAuthTest.genACLForDigest(), -1);
-
-            String invalidAuth = "digest" + Commands.AUTH_INFO_SEPARATOR + "InvalidUser:InvalidPassword";
-            CommandResponse forbidden = Commands.runGetCommand(
-                "watch_details",
-                zkServer,
-                new HashMap<>(),
-                invalidAuth,
-                null);
-            assertEquals(HttpServletResponse.SC_FORBIDDEN, forbidden.getStatusCode());
-
-            CommandResponse allowed = Commands.runGetCommand(
-                "watch_details",
-                zkServer,
-                new HashMap<>(),
-                CommandAuthTest.buildAuthorizationForDigest(),
-                null);
-            assertEquals(HttpServletResponse.SC_OK, allowed.getStatusCode());
-            assertNull(allowed.getError());
-        } finally {
-            CommandAuthTest.addAuthInfoForDigest(zk);
-            CommandAuthTest.resetRootACL(zk);
-            zk.close();
-        }
+        assertEquals(HttpServletResponse.SC_OK, response.getStatusCode());
+        assertNull(response.getError());
     }
 
     @Test
@@ -446,18 +423,31 @@ public class CommandsTest extends ClientBase {
             CommandResponse response = new Commands.WatchDetailsCommand().runGet(zkServer, kwargs);
             List<Map<String, Object>> watches = watchDetails(response);
 
-            assertEquals(5, watches.size());
-            Map<String, Object> plainWatch = findWatch(watches, "/", "data");
+            assertEquals(4, watches.size());
+            Map<String, Object> plainWatch = findWatch(watches, "/", "0x11", "standard");
             assertEquals("0x11", plainWatch.get("session_id"));
             assertEquals("10.10.1.11", plainWatch.get("client_ip"));
             assertEquals(5111, plainWatch.get("client_port"));
+            assertEquals(Arrays.asList("data"), plainWatch.get("watch_kind"));
             assertEquals("standard", plainWatch.get("watch_mode"));
             assertEquals(1000L, plainWatch.get("connection_established_at"));
             assertEquals(20000, plainWatch.get("session_timeout_ms"));
             assertEquals(false, plainWatch.get("secure"));
 
-            Map<String, Object> recursiveWatch = findWatch(watches, "/recursive", "data");
+            Map<String, Object> childWatch = findWatch(
+                watches,
+                "/",
+                "0xffffffffffffffff",
+                "standard");
+            assertEquals(Arrays.asList("children"), childWatch.get("watch_kind"));
+
+            Map<String, Object> recursiveWatch = findWatch(
+                watches,
+                "/recursive",
+                "0xffffffffffffffff",
+                "persistent_recursive");
             assertEquals("0xffffffffffffffff", recursiveWatch.get("session_id"));
+            assertEquals(Arrays.asList("data", "children"), recursiveWatch.get("watch_kind"));
             assertEquals("persistent_recursive", recursiveWatch.get("watch_mode"));
             assertEquals(true, recursiveWatch.get("secure"));
 
@@ -465,13 +455,53 @@ public class CommandsTest extends ClientBase {
             kwargs.put("session_id", "0xffffffffffffffff");
             kwargs.put("client_ip", "10.10.1.25");
             watches = watchDetails(new Commands.WatchDetailsCommand().runGet(zkServer, kwargs));
-            assertEquals(2, watches.size());
-            assertEquals("persistent", findWatch(watches, "/persistent", "data").get("watch_mode"));
-            assertEquals("persistent", findWatch(watches, "/persistent", "children").get("watch_mode"));
+            assertEquals(1, watches.size());
+            Map<String, Object> persistentWatch = findWatch(
+                watches,
+                "/persistent",
+                "0xffffffffffffffff",
+                "persistent");
+            assertEquals(Arrays.asList("data", "children"), persistentWatch.get("watch_kind"));
 
             kwargs.remove("path");
             kwargs.put("session_id", "18446744073709551615");
-            assertEquals(4, watchDetails(new Commands.WatchDetailsCommand().runGet(zkServer, kwargs)).size());
+            assertEquals(3, watchDetails(new Commands.WatchDetailsCommand().runGet(zkServer, kwargs)).size());
+        } finally {
+            dataTree.shutdownWatcher();
+        }
+    }
+
+    @Test
+    public void testWatchDetailsAggregatesStandardDataAndChildKinds() throws Exception {
+        DataTree dataTree = newWatchDetailsDataTree();
+        try {
+            ServerCnxn connection = mockWatchConnection(
+                0x12L,
+                "10.10.1.12",
+                5112,
+                1200L,
+                20000,
+                false,
+                new AtomicBoolean(false));
+            dataTree.statNode("/", connection);
+            dataTree.getChildren("/", null, connection);
+
+            ZooKeeperServer zkServer = mockWatchDetailsServer(
+                dataTree,
+                Collections.singletonList(connection),
+                null);
+            Map<String, String> kwargs = new HashMap<>();
+            kwargs.put("path", "/");
+            kwargs.put("limit", "1");
+
+            CommandResponse response = new Commands.WatchDetailsCommand().runGet(zkServer, kwargs);
+            List<Map<String, Object>> watches = watchDetails(response);
+
+            assertEquals(1, response.toMap().get("returned_count"));
+            assertEquals(false, response.toMap().get("truncated"));
+            assertEquals(1, watches.size());
+            Map<String, Object> watch = findWatch(watches, "/", "0x12", "standard");
+            assertEquals(Arrays.asList("data", "children"), watch.get("watch_kind"));
         } finally {
             dataTree.shutdownWatcher();
         }
@@ -741,13 +771,17 @@ public class CommandsTest extends ClientBase {
     private static Map<String, Object> findWatch(
             List<Map<String, Object>> watches,
             String path,
-            String watchKind) {
+            String sessionId,
+            String watchMode) {
         for (Map<String, Object> watch : watches) {
-            if (path.equals(watch.get("path")) && watchKind.equals(watch.get("watch_kind"))) {
+            if (path.equals(watch.get("path"))
+                    && sessionId.equals(watch.get("session_id"))
+                    && watchMode.equals(watch.get("watch_mode"))) {
                 return watch;
             }
         }
-        throw new AssertionError("Watch not found for path " + path + " and kind " + watchKind);
+        throw new AssertionError(
+            "Watch not found for path " + path + ", session " + sessionId + ", and mode " + watchMode);
     }
 
     @Test

@@ -18,6 +18,8 @@
 
 package org.apache.zookeeper.server.watch;
 
+import java.util.Objects;
+
 /**
  * A single Watch registration held by an {@link IWatchManager}.
  */
@@ -59,5 +61,24 @@ public final class WatchRegistration {
      */
     public WatcherMode getWatcherMode() {
         return watcherMode;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (this == other) {
+            return true;
+        }
+        if (!(other instanceof WatchRegistration)) {
+            return false;
+        }
+        WatchRegistration that = (WatchRegistration) other;
+        return sessionId == that.sessionId
+            && Objects.equals(path, that.path)
+            && watcherMode == that.watcherMode;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(path, sessionId, watcherMode);
     }
 }

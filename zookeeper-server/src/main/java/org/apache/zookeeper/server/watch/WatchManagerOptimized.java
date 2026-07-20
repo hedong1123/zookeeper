@@ -24,6 +24,7 @@ import java.util.BitSet;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -319,10 +320,10 @@ public class WatchManagerOptimized implements IWatchManager, IDeadWatcherListene
         if (maxResults <= 0 || (sessionIds != null && sessionIds.isEmpty())) {
             return Collections.emptyList();
         }
-        List<WatchRegistration> registrations = new ArrayList<>(Math.min(maxResults, 1024));
+        Set<WatchRegistration> registrations = new LinkedHashSet<>(Math.min(maxResults, 1024));
         if (path != null) {
             collectWatchRegistrations(path, pathWatches.get(path), sessionIds, maxResults, registrations);
-            return registrations;
+            return new ArrayList<>(registrations);
         }
         for (Entry<String, BitHashSet> entry : pathWatches.entrySet()) {
             if (collectWatchRegistrations(
@@ -334,7 +335,7 @@ public class WatchManagerOptimized implements IWatchManager, IDeadWatcherListene
                 break;
             }
         }
-        return registrations;
+        return new ArrayList<>(registrations);
     }
 
     private boolean collectWatchRegistrations(
@@ -342,7 +343,7 @@ public class WatchManagerOptimized implements IWatchManager, IDeadWatcherListene
             BitHashSet watchers,
             Set<Long> sessionIds,
             int maxResults,
-            List<WatchRegistration> registrations) {
+            Set<WatchRegistration> registrations) {
         if (watchers == null) {
             return false;
         }
@@ -356,8 +357,9 @@ public class WatchManagerOptimized implements IWatchManager, IDeadWatcherListene
                 if (sessionId == 0 || (sessionIds != null && !sessionIds.contains(sessionId))) {
                     continue;
                 }
-                registrations.add(new WatchRegistration(path, sessionId, WatcherMode.STANDARD));
-                if (registrations.size() >= maxResults) {
+                boolean added = registrations.add(
+                    new WatchRegistration(path, sessionId, WatcherMode.STANDARD));
+                if (added && registrations.size() >= maxResults) {
                     return true;
                 }
             }

@@ -144,6 +144,23 @@ public class WatchManagerTest extends ZKTestCase {
     }
 
     @Test
+    public void testGetWatchRegistrationsDeduplicatesSessionRegistrations() {
+        WatchManager manager = new WatchManager();
+        ServerCnxn firstConnection = mock(ServerCnxn.class);
+        when(firstConnection.getSessionId()).thenReturn(0x34L);
+        when(firstConnection.isStale()).thenReturn(false);
+        ServerCnxn secondConnection = mock(ServerCnxn.class);
+        when(secondConnection.getSessionId()).thenReturn(0x34L);
+        when(secondConnection.isStale()).thenReturn(false);
+        manager.addWatch("/node1", firstConnection);
+        manager.addWatch("/node1", secondConnection);
+
+        List<WatchRegistration> registrations = manager.getWatchRegistrations(null, null, 10);
+
+        assertEquals(1, registrations.size());
+    }
+
+    @Test
     public void testOptimizedGetWatchRegistrationsFiltersAndStopsEarly() {
         WatchManagerOptimized manager = new WatchManagerOptimized();
         try {
@@ -170,6 +187,27 @@ public class WatchManagerTest extends ZKTestCase {
             assertEquals("/node1", registrations.get(0).getPath());
             assertEquals(0x44L, registrations.get(0).getSessionId());
             assertEquals(WatcherMode.STANDARD, registrations.get(0).getWatcherMode());
+        } finally {
+            manager.shutdown();
+        }
+    }
+
+    @Test
+    public void testOptimizedGetWatchRegistrationsDeduplicatesSessionRegistrations() {
+        WatchManagerOptimized manager = new WatchManagerOptimized();
+        try {
+            ServerCnxn firstConnection = mock(ServerCnxn.class);
+            when(firstConnection.getSessionId()).thenReturn(0x45L);
+            when(firstConnection.isStale()).thenReturn(false);
+            ServerCnxn secondConnection = mock(ServerCnxn.class);
+            when(secondConnection.getSessionId()).thenReturn(0x45L);
+            when(secondConnection.isStale()).thenReturn(false);
+            manager.addWatch("/node1", firstConnection);
+            manager.addWatch("/node1", secondConnection);
+
+            List<WatchRegistration> registrations = manager.getWatchRegistrations(null, null, 10);
+
+            assertEquals(1, registrations.size());
         } finally {
             manager.shutdown();
         }

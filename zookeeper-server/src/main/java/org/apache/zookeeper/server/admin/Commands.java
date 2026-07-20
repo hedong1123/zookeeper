@@ -1154,6 +1154,8 @@ public class Commands {
         private static final int DEFAULT_LIMIT = 100;
         private static final int MIN_LIMIT = 1;
         private static final int MAX_LIMIT = 1000;
+        private static final String DATA_WATCH_KIND = "data";
+        private static final String CHILDREN_WATCH_KIND = "children";
 
         public WatchDetailsCommand() {
             super(
@@ -1191,7 +1193,7 @@ public class Commands {
                 }
             }
 
-            List<Map<String, Object>> watchDetails = new ArrayList<>();
+            Map<WatchRegistration, WatchDetail> aggregatedWatchDetails = new LinkedHashMap<>();
             int maxResults = query.limit + 1;
             DataTree dataTree = zkServer.getZKDatabase().getDataTree();
             List<WatchRegistration> dataRegistrations;
@@ -1203,20 +1205,30 @@ public class Commands {
             } catch (UnsupportedOperationException e) {
                 return unsupportedWatchManagerResponse();
             }
-            appendWatchDetails(watchDetails, dataRegistrations, connections, "data");
+            mergeWatchDetails(
+                aggregatedWatchDetails,
+                dataRegistrations,
+                connections,
+                DATA_WATCH_KIND);
 
-            int remaining = maxResults - watchDetails.size();
-            if (remaining > 0) {
-                List<WatchRegistration> childRegistrations;
-                try {
-                    childRegistrations = dataTree.getChildWatchRegistrations(
-                        query.path,
-                        candidateSessionIds,
-                        remaining);
-                } catch (UnsupportedOperationException e) {
-                    return unsupportedWatchManagerResponse();
-                }
-                appendWatchDetails(watchDetails, childRegistrations, connections, "children");
+            List<WatchRegistration> childRegistrations;
+            try {
+                childRegistrations = dataTree.getChildWatchRegistrations(
+                    query.path,
+                    candidateSessionIds,
+                    maxResults);
+            } catch (UnsupportedOperationException e) {
+                return unsupportedWatchManagerResponse();
+            }
+            mergeWatchDetails(
+                aggregatedWatchDetails,
+                childRegistrations,
+                connections,
+                CHILDREN_WATCH_KIND);
+
+            List<Map<String, Object>> watchDetails = new ArrayList<>(aggregatedWatchDetails.size());
+            for (WatchDetail detail : aggregatedWatchDetails.values()) {
+                watchDetails.add(detail.toMap());
             }
 
             boolean truncated = watchDetails.size() > query.limit;
@@ -1330,8 +1342,8 @@ public class Commands {
             }
         }
 
-        private static void appendWatchDetails(
-                List<Map<String, Object>> watchDetails,
+        private static void mergeWatchDetails(
+                Map<WatchRegistration, WatchDetail> watchDetails,
                 List<WatchRegistration> registrations,
                 Map<Long, ConnectionSnapshot> connections,
                 String watchKind) {
@@ -1340,17 +1352,58 @@ public class Commands {
                 if (connection == null) {
                     continue;
                 }
+                WatchDetail detail = watchDetails.get(registration);
+                if (detail == null) {
+                    detail = new WatchDetail(registration, connection);
+                    watchDetails.put(registration, detail);
+                }
+                detail.includeKind(watchKind);
+            }
+        }
+
+        private static final class WatchDetail {
+
+            private final WatchRegistration registration;
+            private final ConnectionSnapshot connection;
+            private boolean data;
+            private boolean children;
+
+            private WatchDetail(WatchRegistration registration, ConnectionSnapshot connection) {
+                this.registration = registration;
+                this.connection = connection;
+            }
+
+            private void includeKind(String watchKind) {
+                if (registration.getWatcherMode().isPersistent()) {
+                    data = true;
+                    children = true;
+                } else if (DATA_WATCH_KIND.equals(watchKind)) {
+                    data = true;
+                } else if (CHILDREN_WATCH_KIND.equals(watchKind)) {
+                    children = true;
+                }
+            }
+
+            private Map<String, Object> toMap() {
+                List<String> watchKinds = new ArrayList<>(2);
+                if (data) {
+                    watchKinds.add(DATA_WATCH_KIND);
+                }
+                if (children) {
+                    watchKinds.add(CHILDREN_WATCH_KIND);
+                }
+
                 Map<String, Object> detail = new LinkedHashMap<>();
                 detail.put("path", registration.getPath());
                 detail.put("session_id", "0x" + Long.toHexString(connection.sessionId));
                 detail.put("client_ip", connection.clientIp);
                 detail.put("client_port", connection.clientPort);
-                detail.put("watch_kind", watchKind);
+                detail.put("watch_kind", watchKinds);
                 detail.put("watch_mode", registration.getWatcherMode().name().toLowerCase(Locale.ROOT));
                 detail.put("connection_established_at", connection.establishedAt);
                 detail.put("session_timeout_ms", connection.sessionTimeout);
                 detail.put("secure", connection.secure);
-                watchDetails.add(detail);
+                return detail;
             }
         }
 

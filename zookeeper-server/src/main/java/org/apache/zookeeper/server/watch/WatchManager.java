@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -335,10 +336,10 @@ public class WatchManager implements IWatchManager {
         if (maxResults <= 0 || (sessionIds != null && sessionIds.isEmpty())) {
             return Collections.emptyList();
         }
-        List<WatchRegistration> registrations = new ArrayList<>(Math.min(maxResults, 1024));
+        Set<WatchRegistration> registrations = new LinkedHashSet<>(Math.min(maxResults, 1024));
         if (path != null) {
             collectWatchRegistrations(path, watchTable.get(path), sessionIds, maxResults, registrations);
-            return registrations;
+            return new ArrayList<>(registrations);
         }
         for (Entry<String, Set<Watcher>> entry : watchTable.entrySet()) {
             if (collectWatchRegistrations(
@@ -350,7 +351,7 @@ public class WatchManager implements IWatchManager {
                 break;
             }
         }
-        return registrations;
+        return new ArrayList<>(registrations);
     }
 
     private boolean collectWatchRegistrations(
@@ -358,7 +359,7 @@ public class WatchManager implements IWatchManager {
             Set<Watcher> watchers,
             Set<Long> sessionIds,
             int maxResults,
-            List<WatchRegistration> registrations) {
+            Set<WatchRegistration> registrations) {
         if (watchers == null) {
             return false;
         }
@@ -377,8 +378,8 @@ public class WatchManager implements IWatchManager {
             }
             for (WatcherMode watcherMode : WatcherMode.values()) {
                 if (stats.hasMode(watcherMode)) {
-                    registrations.add(new WatchRegistration(path, sessionId, watcherMode));
-                    if (registrations.size() >= maxResults) {
+                    boolean added = registrations.add(new WatchRegistration(path, sessionId, watcherMode));
+                    if (added && registrations.size() >= maxResults) {
                         return true;
                     }
                 }
