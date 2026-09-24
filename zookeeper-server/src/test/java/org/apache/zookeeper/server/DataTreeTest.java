@@ -25,6 +25,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -33,6 +38,8 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.Field;
+import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Semaphore;
@@ -47,7 +54,9 @@ import org.apache.zookeeper.KeeperException.NodeExistsException;
 import org.apache.zookeeper.Quotas;
 import org.apache.zookeeper.ZKTestCase;
 import org.apache.zookeeper.ZooDefs;
+import org.apache.zookeeper.Watcher.Event.EventType;
 import org.apache.zookeeper.common.PathTrie;
+import org.apache.zookeeper.data.ACL;
 import org.apache.zookeeper.data.Stat;
 import org.apache.zookeeper.metrics.MetricsUtils;
 import org.apache.zookeeper.txn.CreateTxn;
@@ -60,6 +69,21 @@ import org.slf4j.LoggerFactory;
 public class DataTreeTest extends ZKTestCase {
 
     protected static final Logger LOG = LoggerFactory.getLogger(DataTreeTest.class);
+
+    @Test
+    public void testReplayedExistsWatchIncludesNodeAcl() throws Exception {
+        DataTree dataTree = new DataTree();
+        List<ACL> restrictedAcl = ZooDefs.Ids.CREATOR_ALL_ACL;
+        dataTree.createNode("/restricted", new byte[0], restrictedAcl, 0, 1, 1, 1);
+
+        ServerWatcher watcher = mock(ServerWatcher.class);
+        dataTree.setWatches(0, Collections.emptyList(), Collections.singletonList("/restricted"),
+                Collections.emptyList(), Collections.emptyList(), Collections.emptyList(), watcher);
+
+        verify(watcher).process(argThat(event -> event.getType() == EventType.NodeCreated
+                && "/restricted".equals(event.getPath())), eq(restrictedAcl));
+        verifyNoMoreInteractions(watcher);
+    }
 
     /**
      * For ZOOKEEPER-1755 - Test race condition when taking dumpEphemerals and
