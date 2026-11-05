@@ -18,9 +18,9 @@
 
 package org.apache.zookeeper.test;
 
-import static org.junit.Assert.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import org.apache.zookeeper.Quotas;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 public class QuotasTest {
 
@@ -46,5 +46,19 @@ public class QuotasTest {
     public void testTrimQuotaPath() {
         assertEquals("/foo", Quotas.trimQuotaPath("/zookeeper/quota/foo"));
         assertEquals("/bar", Quotas.trimQuotaPath("/zookeeper/quota/bar"));
+        assertEquals("/a/b", Quotas.trimQuotaPath("/zookeeper/quota/a/b"));
+    }
+
+    @Test
+    public void testTrimQuotaPathIsBoundsSafe() {
+        // Paths not under /zookeeper/quota must not throw
+        // StringIndexOutOfBoundsException (they reach this method via the
+        // transaction-apply path and would otherwise kill the server).
+        assertEquals("", Quotas.trimQuotaPath("/zookeeper"));
+        assertEquals("", Quotas.trimQuotaPath("/z"));
+        assertEquals("", Quotas.trimQuotaPath(""));
+        assertEquals("", Quotas.trimQuotaPath("/some/other/path"));
+        // the /zookeeper/quota root itself trims to an empty namespace
+        assertEquals("", Quotas.trimQuotaPath("/zookeeper/quota"));
     }
 }
